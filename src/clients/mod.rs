@@ -1,9 +1,12 @@
 use crate::{Ironbar, await_sync};
-use color_eyre::Result;
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::fmt::Debug;
+use std::future::Future;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 #[cfg(feature = "bluetooth")]
 pub mod bluetooth;
@@ -43,10 +46,85 @@ pub mod upower;
 pub mod volume;
 pub mod wayland;
 
+#[derive(Debug, thiserror::Error)]
+pub enum Error<E> {
+    #[error("Failed to start client")]
+    Start(#[source] E),
+    #[allow(dead_code)]
+    #[error("Failed to stop client")]
+    Stop(#[source] E),
+    #[error("Error from underlying service")]
+    Service(#[from] E),
+    #[error("Client is not running")]
+    InvalidState,
+}
+
+pub type Result<T, E> = std::result::Result<T, Error<E>>;
+
+enum RegistryEntry<T> {
+    Owned(T),
+    Shared(Arc<T>),
+}
+
+pub trait Client: Debug + Any + Sized {
+    /// The current client data, used to initialize a module.
+    type State;
+    /// The type of event emitted by the client.
+    type Event;
+    /// The general error type raised by the client,
+    /// eg `zbus::Error` for DBus-based clients.
+    type Error: std::error::Error + Send + Sync;
+
+    /// Returns whether the client has been initialized
+    /// and is currently in a running state.
+    fn is_started(&self) -> bool;
+
+    /// Initializes the client,
+    /// creating any connections that should persist for its lifetime.
+    ///
+    /// This takes `self`, allowing for the client to be mutated freely.
+    /// The mutated client is then returned.
+    ///
+    /// If the client is already running, this should be a successful no-op.
+    fn start(self) -> impl Future<Output = std::result::Result<Self, Self::Error>> + Send;
+
+    /// Stops the client, closing any open connections
+    /// and clearing any internal state.
+    ///
+    /// This takes `self`, allowing for the client to be mutated freely.
+    /// The mutated client is then returned.
+    ///
+    /// If the client is already stopped, this should be a successful no-op.
+    #[allow(dead_code)]
+    fn stop(self) -> impl Future<Output = std::result::Result<Self, Self::Error>> + Send;
+
+    /// Gets the current data for the system.
+    /// This should be used when initializing a module.
+    fn state(&self) -> impl Future<Output = Result<Self::State, Self::Error>> + Send;
+
+    /// Returns a broadcast receiver for the client's events.
+    fn subscribe(&self) -> broadcast::Receiver<Self::Event>;
+}
+
+type RegistryKey = (TypeId, Option<Box<str>>);
+
 /// Singleton wrapper consisting of
 /// all the singleton client types used by modules.
 #[derive(Debug, Default)]
 pub struct Clients {
+    /// All currently registered clients, regardless of activation state.
+    ///
+    /// The second part of the key is an optional discriminator
+    /// used where multiple clients of the same type can be registered.
+    ///
+    /// An `Any` type is used to decouple this type from the client implementations.
+    ///
+    /// Note that all values inserted into this registry
+    /// MUST implement the `Client` trait - this is not typed here
+    /// due to compiler limitations.
+    registry: HashMap<RegistryKey, Box<dyn Any>>,
+
+    // -- old - to sort -- \\
     wayland: Option<Arc<wayland::Client>>,
     outputs: Option<Arc<outputs::Client>>,
     #[cfg(feature = "workspaces")]
@@ -62,8 +140,6 @@ pub struct Clients {
     #[cfg(feature = "inhibit")]
     inhibit: Option<Arc<inhibit::Client>>,
     #[cfg(feature = "keyboard")]
-    libinput: HashMap<Box<str>, Arc<libinput::Client>>,
-    #[cfg(feature = "keyboard")]
     keyboard_layout: Option<Arc<dyn compositor::KeyboardLayoutClient>>,
     #[cfg(feature = "cairo")]
     lua: Option<Rc<lua::LuaEngine>>,
@@ -71,8 +147,6 @@ pub struct Clients {
     music: HashMap<music::ClientType, Arc<dyn music::MusicClient>>,
     #[cfg(feature = "network_manager")]
     network_manager: Option<Arc<networkmanager::Client>>,
-    #[cfg(feature = "notifications")]
-    notifications: Option<Arc<swaync::Client>>,
     #[cfg(feature = "sys_info")]
     sys_info: Option<Arc<sysinfo::Client>>,
     #[cfg(feature = "tray")]
@@ -87,11 +161,50 @@ pub struct Clients {
     bluetooth: Option<Arc<bluetooth::Client>>,
 }
 
-pub type ClientResult<T> = Result<Arc<T>>;
+pub type ClientResult<T> = color_eyre::Result<Arc<T>>;
 
 impl Clients {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Gets a client from the registry,
+    /// creating it using `init` if it does not exist,
+    /// and starting it if it is not running.
+    ///
+    /// Use `key` as an optional discriminator where necessary
+    /// if multiple instances of the same client type could exist.
+    async fn get_or_init<T: Client>(
+        &mut self,
+        key: Option<&str>,
+        init: impl FnOnce() -> T,
+    ) -> Result<Arc<T>, T::Error> {
+        let key = (TypeId::of::<T>(), key.map(Box::from));
+
+        let entry = match self.registry.remove(&key) {
+            Some(entry) => *entry
+                .downcast::<RegistryEntry<T>>()
+                .expect("should be registry entry"),
+            None => RegistryEntry::Owned(init()),
+        };
+
+        let client = match entry {
+            RegistryEntry::Owned(client) => {
+                let client = if client.is_started() {
+                    client
+                } else {
+                    client.start().await.map_err(Error::<T::Error>::Start)?
+                };
+
+                Arc::new(client)
+            }
+            RegistryEntry::Shared(client) => client,
+        };
+
+        self.registry
+            .insert(key, Box::new(RegistryEntry::Shared(client.clone())));
+
+        Ok(client)
     }
 
     pub fn wayland(&mut self) -> Arc<wayland::Client> {
@@ -194,14 +307,12 @@ impl Clients {
     }
 
     #[cfg(feature = "keyboard")]
-    pub fn libinput(&mut self, seat: &str) -> Arc<libinput::Client> {
-        if let Some(client) = self.libinput.get(seat) {
-            client.clone()
-        } else {
-            let client = libinput::Client::init(seat.to_string());
-            self.libinput.insert(seat.into(), client.clone());
-            client
-        }
+    pub fn libinput(&mut self, seat: &str) -> ClientResult<libinput::Client> {
+        let client = await_sync(async move {
+            self.get_or_init(Some(seat), || libinput::Client::new(seat))
+                .await
+        });
+        client.map_err(Into::into)
     }
 
     #[cfg(feature = "music")]
@@ -225,16 +336,8 @@ impl Clients {
 
     #[cfg(feature = "notifications")]
     pub fn notifications(&mut self) -> ClientResult<swaync::Client> {
-        let client = if let Some(client) = &self.notifications {
-            client.clone()
-        } else {
-            let client = await_sync(async { swaync::Client::new().await })?;
-            let client = Arc::new(client);
-            self.notifications.replace(client.clone());
-            client
-        };
-
-        Ok(client)
+        let client = await_sync(async move { self.get_or_init(None, swaync::Client::new).await });
+        client.map_err(Into::into)
     }
 
     #[cfg(feature = "sys_info")]
@@ -260,6 +363,9 @@ impl Clients {
             self.tray.replace(client.clone());
             client
         };
+
+        #[cfg(feature = "ipc")]
+        Ironbar::variable_manager().register_namespace("tray", client.clone());
 
         Ok(client)
     }

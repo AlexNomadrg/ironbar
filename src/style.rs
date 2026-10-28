@@ -1,33 +1,40 @@
 use crate::channels::{AsyncSenderExt, MpscReceiverExt};
+use crate::config::CssSource;
 use crate::spawn;
 use gtk::ffi::GTK_STYLE_PROVIDER_PRIORITY_USER;
+use gtk::prelude::*;
 use gtk::{CssProvider, gio};
 use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecursiveMode, Result, Watcher, recommended_watcher};
 use std::env;
-use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{debug, error, info};
-
-#[derive(Debug)]
-pub enum CssSource {
-    String(&'static str),
-    File(PathBuf),
-}
 
 /// Attempts to load CSS file at the given path
 /// and attach if to the current GTK application.
 ///
 /// Installs a file watcher and reloads CSS when
 /// write changes are detected on the file.
-pub fn load_css(source: &CssSource) {
+pub fn load_css(source: &CssSource, hot_reload: bool) {
     let provider = CssProvider::new();
 
+    // GTK only applies the system color scheme to its own providers
+    if let Some(settings) = gtk::Settings::default() {
+        settings
+            .bind_property(
+                "gtk-interface-color-scheme",
+                &provider,
+                "prefers-color-scheme",
+            )
+            .sync_create()
+            .build();
+    }
+
     let path = match source {
-        CssSource::String(str) => {
-            provider.load_from_string(str);
+        CssSource::Builtin(b) => {
+            provider.load_from_string(b.css());
             debug!("loaded built-in css");
             None
         }
@@ -55,7 +62,7 @@ pub fn load_css(source: &CssSource) {
     );
 
     // install file watcher
-    if let Some(style_path) = path {
+    if hot_reload && let Some(style_path) = path {
         let (tx, rx) = mpsc::channel(8);
 
         spawn(async move {

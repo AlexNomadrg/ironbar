@@ -1,10 +1,12 @@
+use std::collections::HashMap;
+
 use crate::config::{
     CommonConfig, LayoutConfig, MarqueeMode, ModuleOrientation, Profiles, TruncateMode,
 };
 use crate::profiles;
 use serde::Deserialize;
 
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize, PartialEq)]
 #[cfg_attr(feature = "extras", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct VolumeProfile {
@@ -29,7 +31,7 @@ pub(super) fn default_profiles() -> Profiles<f64, VolumeProfile> {
     )
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[cfg_attr(feature = "extras", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct VolumeModule {
@@ -85,6 +87,11 @@ pub struct VolumeModule {
     #[serde(flatten)]
     pub(super) profiles: Profiles<f64, VolumeProfile>,
 
+    /// Allows to overwrite device description with a custom one.
+    /// Use `{name}` to reuse the device name in the new one.
+    /// Add `-muted` for when the sink or source is muted.
+    pub(super) name_map: HashMap<Box<str>, String>,
+
     // -- Common --
     /// See [truncate options](module-level-options#truncate-mode).
     ///
@@ -108,6 +115,14 @@ pub struct VolumeModule {
     /// See [common options](module-level-options#common-options).
     #[serde(flatten)]
     pub common: Option<CommonConfig>,
+
+    /// Control by amount in percent a scroll moves the volume levels.
+    /// Use Negative values to inverse scroll direction.
+    /// By default the direction uses natural scroll.
+    /// To disable scrolling use `null`, 0 or `nan`.
+    ///
+    /// **Default**: 1.0
+    pub(crate) scroll_step: Option<f64>,
 }
 
 impl Default for VolumeModule {
@@ -123,16 +138,18 @@ impl Default for VolumeModule {
             show_sources: true,
             show_monitors: false,
             profiles: Profiles::default(),
+            name_map: HashMap::new(),
             truncate: None,
             truncate_popup: None,
             marquee: MarqueeMode::default(),
             layout: LayoutConfig::default(),
             common: Some(CommonConfig::default()),
+            scroll_step: Some(1.0),
         }
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "extras", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct Icons {

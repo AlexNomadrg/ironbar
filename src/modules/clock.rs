@@ -16,7 +16,7 @@ use crate::modules::{
 };
 use crate::{module_impl, spawn};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 #[cfg_attr(feature = "extras", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct ClockModule {
@@ -203,7 +203,7 @@ impl Module<Button> for ClockModule {
         // Reset selected date on each popup open
         context.popup.popover.connect_show(move |_| {
             let date = glib::DateTime::now_local().expect("should get current time");
-            calendar.select_day(&date);
+            calendar.set_date(&date);
         });
 
         Some(container)

@@ -55,7 +55,7 @@ Ironbar is designed to support anything from a lightweight bar to a full desktop
 - A range of modules which integrate with native desktop libraries
 - Ability to create custom widgets, run scripts and embed dynamic content (including via Lua)
 - Easy to configure anything from a single bar across all monitors, to multiple different unique bars per monitor 
-- Support for multiple config languages
+- Support for multiple config languages, with config hot-reloading
 
 ---
 
@@ -74,6 +74,7 @@ The project strives to stay true to these key philosophies:
 ## Installation
 
 [![Packaging status](https://repology.org/badge/vertical-allrepos/ironbar.svg)](https://repology.org/project/ironbar/versions)
+
 
 Ironbar can be installed from source or using your preferred package manager.
 
@@ -228,6 +229,7 @@ Ironbar can be launched using the `ironbar` binary.
 The `IRONBAR_LOG` and `IRONBAR_FILE_LOG` environment variables can be set
 to change console and file log verbosity respectively.
 You can use any of `error`, `warn`, `info`, `debug` or `trace`.
+`IRONBAR_FILE_LOG` also supports `off` to disable file logging.
 
 These default to `IRONBAR_LOG=info` and `IRONBAR_FILE_LOG=warn`.
 Note that you cannot increase the file log verbosity above console verbosity.

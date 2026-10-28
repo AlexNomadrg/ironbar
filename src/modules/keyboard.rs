@@ -8,13 +8,14 @@ use tracing::{debug, error, trace};
 
 use super::{Module, ModuleInfo, ModuleParts, WidgetContext};
 use crate::channels::{AsyncSenderExt, BroadcastReceiverExt};
+use crate::clients::Client;
 use crate::clients::compositor::{self, KeyboardLayoutUpdate};
 use crate::clients::libinput::{Event, Key, KeyEvent};
 use crate::config::{CommonConfig, LayoutConfig};
 use crate::image::{IconButton, IconLabel};
 use crate::{module_impl, spawn};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 #[cfg_attr(feature = "extras", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct KeyboardModule {
@@ -80,7 +81,7 @@ impl Default for KeyboardModule {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 #[cfg_attr(feature = "extras", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct Icons {
@@ -166,7 +167,7 @@ impl Module<gtk::Box> for KeyboardModule {
         context: &WidgetContext<Self::SendMessage, Self::ReceiveMessage>,
         mut rx: mpsc::Receiver<Self::ReceiveMessage>,
     ) -> Result<()> {
-        let client = context.ironbar.clients.borrow_mut().libinput(&self.seat);
+        let client = context.ironbar.clients.borrow_mut().libinput(&self.seat)?;
 
         let tx = context.tx.clone();
         spawn(async move {

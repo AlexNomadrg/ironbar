@@ -1,3 +1,6 @@
+#[cfg(feature = "ipc")]
+mod ironvar;
+
 use super::ClientResult;
 use crate::channels::SyncSenderExt;
 use crate::{arc_mut, lock, register_fallible_client, spawn};
@@ -106,6 +109,19 @@ impl Client {
 
     pub async fn activate(&self, req: ActivateRequest) -> system_tray::error::Result<()> {
         self.client.activate(req).await
+    }
+
+    /// Requests the menu to refresh its contents before being shown
+    /// (DBusMenu `AboutToShow`). Returns whether the menu should be re-fetched.
+    pub async fn about_to_show_menuitem(
+        &self,
+        address: String,
+        menu_path: String,
+        id: i32,
+    ) -> system_tray::error::Result<bool> {
+        self.client
+            .about_to_show_menuitem(address, menu_path, id)
+            .await
     }
 }
 

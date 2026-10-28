@@ -1,5 +1,5 @@
 use crate::channels::{AsyncSenderExt, BroadcastReceiverExt};
-use crate::clients::swaync;
+use crate::clients::{Client, swaync};
 use crate::config::CommonConfig;
 use crate::image::IconButton;
 use crate::modules::{Module, ModuleInfo, ModuleParts, ModuleUpdateEvent, WidgetContext};
@@ -10,7 +10,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc::Receiver;
 use tracing::error;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 #[cfg_attr(feature = "extras", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct NotificationsModule {
@@ -39,7 +39,7 @@ impl Default for NotificationsModule {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "extras", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct Icons {
@@ -149,7 +149,10 @@ impl Module<Overlay> for NotificationsModule {
             while let Some(event) = rx.recv().await {
                 match event {
                     UiEvent::ToggleVisibility => {
-                        client.toggle_visibility().await;
+                        if let Err(err) = client.toggle_visibility().await {
+                            error!("error toggling panel visibility: {err:?}");
+                        }
+
                         tx.send_expect(ModuleUpdateEvent::ClosePopup).await;
                     }
                 }
