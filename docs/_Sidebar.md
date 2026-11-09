@@ -15,6 +15,7 @@
 - [Scripts](scripts)
 - [Ironvars](ironvars)
 - [IPC Specification](ipc)
+- [Lua](lua)
 
 # Examples
 
@@ -43,7 +44,8 @@
 - [Music](music)
 - [Network Manager](network-manager)
 - [Notifications](notifications)
-- [Sys_Info](sys-info)
+- [Power Profiles](powerprofiles)
+- [Sys Info](sys-info)
 - [Tray](tray)
 - [Volume](volume)
 - [Workspaces](workspaces)

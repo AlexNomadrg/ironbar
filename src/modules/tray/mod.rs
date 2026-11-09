@@ -27,6 +27,7 @@ struct IconConfig {
     size: u32,
     prefer_theme: bool,
     order: Vec<String>,
+    hidden: Vec<String>,
 }
 
 /// Reserved tray click actions
@@ -171,6 +172,12 @@ pub struct TrayModule {
     /// **Default**: icons are pre append when received by the bar.
     icon_order: Vec<String>,
 
+    /// Tray items to hide from the bar.
+    /// The names are case insensitive and must be included in the id of tray entry.
+    ///
+    /// **Default**: `[]`
+    hidden_items: Vec<String>,
+
     /// Click action handlers for tray icons
     #[serde(flatten)]
     click_handlers: TrayClickHandlers,
@@ -187,6 +194,7 @@ impl Default for TrayModule {
             icon_size: default::IconSize::Tiny as u32,
             direction: None,
             icon_order: Vec::new(),
+            hidden_items: Vec::new(),
             click_handlers: TrayClickHandlers::default(),
             common: Some(CommonConfig::default()),
         }
@@ -310,6 +318,7 @@ impl Module<gtk::Box> for TrayModule {
                 size: self.icon_size,
                 prefer_theme: self.prefer_theme_icons,
                 order: self.icon_order,
+                hidden: self.hidden_items,
             };
 
             // listen for UI updates
@@ -469,12 +478,20 @@ fn on_update(
                 None
             };
 
-            container.insert_child_after(&menu_item.widget, widget);
-            if let Some((_, order)) = key_order
-                && let Some(widget) = widget
-                && order
-            {
-                container.reorder_child_after(widget, Some(&menu_item.widget));
+            let id = menu_item.id.to_lowercase();
+            let hidden = icon_config
+                .hidden
+                .iter()
+                .any(|name| id.contains(&name.to_lowercase()));
+
+            if !hidden {
+                container.insert_child_after(&menu_item.widget, widget);
+                if let Some((_, order)) = key_order
+                    && let Some(widget) = widget
+                    && order
+                {
+                    container.reorder_child_after(widget, Some(&menu_item.widget));
+                }
             }
 
             // Register both a fallback label and a picture synchronously so
@@ -592,7 +609,9 @@ fn on_update(
                 if let Some(child) = menu.widget.last_child() {
                     child.unparent(); // removing popover
                 }
-                container.remove(&menu.widget);
+                if menu.widget.parent().is_some() {
+                    container.remove(&menu.widget);
+                }
             }
         }
     }

@@ -2,11 +2,11 @@
 use crate::channels::BroadcastReceiverExt;
 #[cfg(feature = "workspaces")]
 use crate::clients::compositor::WorkspaceUpdate;
-use crate::config::diff::BarConfigDiff;
+use crate::config::diff::{BarConfigDiff, ModulesDiff};
 use crate::config::{AutohideListener, BarConfig, BarPosition, MarginConfig, ModuleConfig};
 use crate::modules::{BarModuleFactory, ModuleInfo, ModuleLocation, ModuleRef};
 use crate::popup::Popup;
-use crate::{Ironbar, rc_mut};
+use crate::{Ironbar, lock, rc_mut};
 use gtk::gdk::Monitor;
 use gtk::{
     Application, ApplicationWindow, CenterBox, EventControllerMotion, EventControllerScroll,
@@ -211,10 +211,15 @@ impl Bar {
 
     /// Closes the bar, consuming it.
     pub fn close(self) {
-        let mut autohide_state = self.autohide_state.borrow_mut();
-        if let Some(autohide_state) = autohide_state.as_mut() {
-            autohide_state.hotspot_window.close();
-            autohide_state.hotspot_window.destroy();
+        let hotspot_window = self
+            .autohide_state
+            .borrow()
+            .as_ref()
+            .map(|state| state.hotspot_window.clone());
+
+        if let Some(hotspot_window) = hotspot_window {
+            hotspot_window.close();
+            hotspot_window.destroy();
         }
         self.window.close();
         self.window.destroy();
@@ -256,17 +261,28 @@ impl Bar {
     }
 
     pub fn set_locked(&self, locked: bool) {
-        let mut autohide_state = self.autohide_state.borrow_mut();
-        let Some(autohide_state) = autohide_state.as_mut() else {
-            return;
+        // hiding the window can synchronously emit signals
+        // which re-borrow the autohide state, so the borrow must be dropped first.
+        let hotspot_window = {
+            let mut autohide_state = self.autohide_state.borrow_mut();
+            let Some(autohide_state) = autohide_state.as_mut() else {
+                return;
+            };
+
+            if locked {
+                autohide_state.lock_state = LockState::Locked;
+                None
+            } else if autohide_state.lock_state == LockState::LockedPendingClose {
+                autohide_state.lock_state = LockState::Unlocked;
+                Some(autohide_state.hotspot_window.clone())
+            } else {
+                None
+            }
         };
 
-        if locked {
-            autohide_state.lock_state = LockState::Locked;
-        } else if autohide_state.lock_state == LockState::LockedPendingClose {
+        if let Some(hotspot_window) = hotspot_window {
             self.window.set_visible(false);
-            autohide_state.hotspot_window.set_visible(true);
-            autohide_state.lock_state = LockState::Unlocked;
+            hotspot_window.set_visible(true);
         }
     }
 
@@ -341,10 +357,53 @@ impl Bar {
             Inner::Loaded { module_refs, .. } => module_refs,
         };
 
+        let content = &self.content;
+
         let mut load_modules = |mut modules: Vec<ModuleConfig>,
-                                diffs: Vec<usize>,
+                                diff: ModulesDiff,
                                 container: &gtk::Box,
                                 location: ModuleLocation| {
+            let diffs = match diff {
+                ModulesDiff::Changed(diffs) => diffs,
+                ModulesDiff::Reload => {
+                    debug!("re-rendering {location:?} modules");
+
+                    for existing_module in module_refs.iter().filter(|m| m.location == location) {
+                        let existing_wrapper = existing_module
+                            .root_widget
+                            .parent()
+                            .expect("root should have revealer parent");
+                        container.remove(&existing_wrapper);
+                    }
+
+                    module_refs.retain(|m| m.location != location);
+
+                    let container = (!modules.is_empty()).then_some(container);
+                    match location {
+                        ModuleLocation::Start => content.set_start_widget(container),
+                        ModuleLocation::Center => content.set_center_widget(container),
+                        ModuleLocation::End => content.set_end_widget(container),
+                    }
+
+                    let Some(container) = container else {
+                        return;
+                    };
+
+                    for module in modules {
+                        let name = module.name();
+                        match module.create(&module_factory, container, &info!(location)) {
+                            Ok(module) => module_refs.push(module),
+                            Err(err) => error!("failed to create module {name}: {:?}", err),
+                        }
+                    }
+
+                    return;
+                }
+                ModulesDiff::NoChange => {
+                    vec![]
+                }
+            };
+
             // avoid potential panic if all modules are disabled, but...
             if modules.is_empty() {
                 return;
@@ -383,17 +442,26 @@ impl Bar {
             }
         };
 
-        if let Some(modules) = config.start {
-            load_modules(modules, diff.start, &self.start, ModuleLocation::Start);
-        }
+        load_modules(
+            config.start.unwrap_or_default(),
+            diff.start,
+            &self.start,
+            ModuleLocation::Start,
+        );
 
-        if let Some(modules) = config.center {
-            load_modules(modules, diff.center, &self.center, ModuleLocation::Center);
-        }
+        load_modules(
+            config.center.unwrap_or_default(),
+            diff.center,
+            &self.center,
+            ModuleLocation::Center,
+        );
 
-        if let Some(modules) = config.end {
-            load_modules(modules, diff.end, &self.end, ModuleLocation::End);
-        }
+        load_modules(
+            config.end.unwrap_or_default(),
+            diff.end,
+            &self.end,
+            ModuleLocation::End,
+        );
     }
 
     /// Sets up GTK layer shell for a provided application window.
@@ -532,7 +600,7 @@ impl Bar {
 
     #[cfg(feature = "workspaces")]
     fn setup_workspace_reveal(&self, bar: &Rc<Bar>, timeout: u64) {
-        let client = match self.ironbar.clients.borrow_mut().workspaces() {
+        let client = match lock!(self.ironbar.clients).workspaces() {
             Ok(client) => client,
             Err(err) => {
                 tracing::warn!("Failed to subscribe to workspace events: {err:?}");
@@ -552,8 +620,14 @@ impl Bar {
 
     fn autohide_show(&self) {
         self.window.set_visible(true);
-        if let Some(state) = self.autohide_state.borrow().as_ref() {
-            state.hotspot_window.set_visible(false);
+        let hotspot_window = self
+            .autohide_state
+            .borrow()
+            .as_ref()
+            .map(|state| state.hotspot_window.clone());
+
+        if let Some(hotspot_window) = hotspot_window {
+            hotspot_window.set_visible(false);
         }
     }
 
@@ -576,23 +650,31 @@ impl Bar {
 
         let timeout_id =
             glib::timeout_add_local_once(Duration::from_millis(timeout_ms), move || {
-                let mut state = autohide_state.borrow_mut();
-                let Some(state) = state.as_mut() else {
-                    return;
+                let hotspot_window = {
+                    let mut state = autohide_state.borrow_mut();
+                    let Some(state) = state.as_mut() else {
+                        return;
+                    };
+
+                    state.timeout_id = None;
+
+                    if popup.as_ref().is_some_and(|popup| popup.visible()) {
+                        return;
+                    }
+
+                    if state.lock_state == LockState::Locked {
+                        state.lock_state = LockState::LockedPendingClose;
+                        return;
+                    }
+
+                    state.hotspot_window.clone()
                 };
 
-                state.timeout_id = None;
-
-                if popup.as_ref().is_some_and(|popup| popup.visible()) {
-                    return;
-                }
-
-                if state.lock_state == LockState::Locked {
-                    state.lock_state = LockState::LockedPendingClose;
-                } else {
-                    win.set_visible(false);
-                    state.hotspot_window.set_visible(true);
-                }
+                // hiding the window also hides the popover,
+                // which synchronously emits `hide`/`leave` signals that re-borrow the autohide state.
+                // The borrow must be dropped before this point.
+                win.set_visible(false);
+                hotspot_window.set_visible(true);
             });
 
         if let Some(state) = self.autohide_state.borrow_mut().as_mut() {

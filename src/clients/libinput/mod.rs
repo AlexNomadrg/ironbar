@@ -1,4 +1,7 @@
-use crate::channels::SyncSenderExt;
+#[cfg(feature = "lua")]
+pub mod lua;
+
+use crate::channels::{BroadcastChannel, SyncSenderExt};
 use crate::{Ironbar, arc_rw, read_lock, spawn, write_lock};
 use colpetto::event::{AsRawEvent, DeviceEvent, KeyState, KeyboardEvent};
 use colpetto::{DeviceCapability, EventStream, Libinput};
@@ -8,6 +11,7 @@ use futures_lite::StreamExt;
 use rustix::fs::{Mode, OFlags, open};
 use rustix::io::Errno;
 use std::ffi::{CStr, CString, c_int};
+use std::fmt::{Display, Formatter};
 use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::io::OwnedFd;
 use std::path::{Path, PathBuf};
@@ -95,7 +99,17 @@ pub enum Event {
     Key(KeyEvent),
 }
 
+impl Display for Event {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Device => "device",
+            Self::Key(_) => "key",
+        })
+    }
+}
+
 #[allow(dead_code)]
+#[cfg_attr(feature = "lua", derive(mlua::UserData))]
 pub struct State {
     pub caps: bool,
     pub num: bool,
@@ -122,14 +136,12 @@ impl<P: AsRef<Path>> TryFrom<KeyData<P>> for Event {
 #[derive(Debug)]
 pub enum Client {
     Stopped {
+        channel: BroadcastChannel<Event>,
         seat: String,
-        tx: broadcast::Sender<Event>,
-        _rx: broadcast::Receiver<Event>,
     },
     Started {
+        channel: BroadcastChannel<Event>,
         seat: String,
-        tx: broadcast::Sender<Event>,
-        _rx: broadcast::Receiver<Event>,
         known_devices: Arc<RwLock<Vec<PathBuf>>>,
         stop_tx: oneshot::Sender<()>,
     },
@@ -137,11 +149,9 @@ pub enum Client {
 
 impl Client {
     pub(super) fn new(seat: &str) -> Self {
-        let (tx, rx) = broadcast::channel(4);
         Self::Stopped {
+            channel: BroadcastChannel::new(4),
             seat: seat.to_owned(),
-            tx,
-            _rx: rx,
         }
     }
 
@@ -243,8 +253,8 @@ impl Client {
 
     fn tx(&self) -> &broadcast::Sender<Event> {
         match self {
-            Self::Stopped { tx, .. } => tx,
-            Self::Started { tx, .. } => tx,
+            Self::Stopped { channel, .. } => channel,
+            Self::Started { channel, .. } => channel,
         }
     }
 
@@ -272,7 +282,7 @@ impl super::Client for Client {
     }
 
     async fn start(self) -> std::result::Result<Self, Self::Error> {
-        let Self::Stopped { seat, tx, _rx } = self else {
+        let Self::Stopped { seat, channel } = self else {
             return Ok(self);
         };
 
@@ -285,7 +295,7 @@ impl super::Client for Client {
         // so the event loop lives on a dedicated thread with its own `LocalSet`.
         {
             let seat = seat.clone();
-            let tx = tx.clone();
+            let tx = channel.clone();
             let known_devices = known_devices.clone();
 
             std::thread::spawn(move || {
@@ -323,9 +333,8 @@ impl super::Client for Client {
         ready_rx.await.map_err(|_| Error::ThreadExited)??;
 
         Ok(Self::Started {
+            channel,
             seat,
-            tx,
-            _rx,
             known_devices,
             stop_tx,
         })
@@ -333,9 +342,8 @@ impl super::Client for Client {
 
     async fn stop(self) -> std::result::Result<Self, Self::Error> {
         let Self::Started {
+            channel,
             seat,
-            tx,
-            _rx,
             stop_tx,
             ..
         } = self
@@ -349,7 +357,7 @@ impl super::Client for Client {
             );
         }
 
-        Ok(Self::Stopped { seat, tx, _rx })
+        Ok(Self::Stopped { channel, seat })
     }
 
     async fn state(&self) -> super::Result<Self::State, Self::Error> {

@@ -1,7 +1,7 @@
 mod dbus;
 
-use crate::channels::SyncSenderExt;
-use crate::{register_fallible_client, spawn};
+use crate::channels::{BroadcastChannel, SyncSenderExt};
+use crate::{register_fallible_client, spawn, stop_basic};
 use dbus::SwayNcProxy;
 use serde::Deserialize;
 use tokio::sync::broadcast;
@@ -11,6 +11,7 @@ use zbus::Type;
 use zbus::export::ordered_stream::OrderedStreamExt;
 
 #[derive(Debug, Clone, Copy, Type, Deserialize)]
+#[cfg_attr(feature = "lua", derive(mlua::UserData))]
 #[allow(dead_code)]
 pub struct Event {
     pub count: u32,
@@ -36,13 +37,9 @@ impl From<GetSubscribeData> for Event {
 
 #[derive(Debug)]
 pub enum Client {
-    Stopped {
-        tx: broadcast::Sender<Event>,
-        _rx: broadcast::Receiver<Event>,
-    },
+    Stopped(BroadcastChannel<Event>),
     Started {
-        tx: broadcast::Sender<Event>,
-        _rx: broadcast::Receiver<Event>,
+        channel: BroadcastChannel<Event>,
         proxy: SwayNcProxy<'static>,
         handle: JoinHandle<()>,
     },
@@ -50,8 +47,7 @@ pub enum Client {
 
 impl Client {
     pub(super) fn new() -> Self {
-        let (tx, rx) = broadcast::channel(8);
-        Self::Stopped { tx, _rx: rx }
+        Self::Stopped(BroadcastChannel::new(8))
     }
 
     fn proxy(&self) -> super::Result<&SwayNcProxy<'static>, zbus::Error> {
@@ -63,8 +59,8 @@ impl Client {
 
     fn tx(&self) -> &broadcast::Sender<Event> {
         match self {
-            Client::Stopped { tx, .. } => tx,
-            Client::Started { tx, .. } => tx,
+            Client::Stopped(channel) => channel,
+            Client::Started { channel, .. } => channel,
         }
     }
 
@@ -85,7 +81,7 @@ impl super::Client for Client {
     }
 
     async fn start(self) -> Result<Self, Self::Error> {
-        let Self::Stopped { tx, _rx } = self else {
+        let Self::Stopped(channel) = self else {
             return Ok(self);
         };
 
@@ -96,7 +92,7 @@ impl super::Client for Client {
         let mut stream = proxy.receive_subscribe_v2().await?;
 
         let handle = spawn({
-            let tx = tx.clone();
+            let tx = channel.clone();
             async move {
                 while let Some(ev) = stream.next().await {
                     let ev = ev.message().body().deserialize::<Event>();
@@ -116,24 +112,14 @@ impl super::Client for Client {
         });
 
         Ok(Self::Started {
-            tx,
-            _rx,
+            channel,
             proxy,
             handle,
         })
     }
 
     async fn stop(self) -> Result<Self, Self::Error> {
-        let Self::Started {
-            tx, _rx, handle, ..
-        } = self
-        else {
-            return Ok(self);
-        };
-
-        handle.abort();
-
-        Ok(Self::Stopped { tx, _rx })
+        stop_basic!(self)
     }
 
     async fn state(&self) -> super::Result<Self::State, Self::Error> {
